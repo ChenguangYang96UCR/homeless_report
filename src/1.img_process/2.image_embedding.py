@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 
 import numpy as np
@@ -11,9 +12,10 @@ from torchvision.models import ResNet50_Weights
 from sklearn.cluster import KMeans
 from tqdm import tqdm
 
+YEAR = 2025
 
-IMAGE_ROOT = Path("/Users/chenguangyang/Desktop/ucr_work/homeless_report/satellite_images_esri/2025")
-OUT_DIR = Path("/Users/chenguangyang/Desktop/ucr_work/homeless_report/embedding_cluster_2025")
+IMAGE_ROOT = Path(f"/Users/chenguangyang/Desktop/ucr_work/homeless_report/satellite_images_esri/{YEAR}")
+OUT_DIR = Path(f"/Users/chenguangyang/Desktop/ucr_work/homeless_report/image_embedding/image_embedding_cluster_{YEAR}")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 N_CLUSTERS = 5
@@ -137,14 +139,7 @@ def embed_images(df, model, transform, device):
     return metadata, image_embeddings
 
 
-def sorted_embedding_columns(columns):
-    return sorted(
-        [c for c in columns if c.startswith("emb_")],
-        key=lambda x: int(x.split("_")[1])
-    )
-
-
-def build_week_zip_embeddings(metadata, image_embeddings):
+def build_week_embeddings(metadata, image_embeddings):
     emb_dim = image_embeddings.shape[1]
     emb_cols = [f"emb_{i}" for i in range(emb_dim)]
 
@@ -155,91 +150,82 @@ def build_week_zip_embeddings(metadata, image_embeddings):
         axis=1
     )
 
-    zip_week = (
+    week_zip = (
         image_level
         .groupby(["week", "zipcode"], as_index=False)[emb_cols]
         .mean()
     )
 
     existing_weeks = sorted(metadata["week"].unique())
-    all_rows = []
+    rows = []
 
     for week in existing_weeks:
-        week_df = zip_week[zip_week["week"] == week].set_index("zipcode")
+        week_df = week_zip[week_zip["week"] == week].set_index("zipcode")
+        week_embedding = []
+        has_image = []
 
         for zipcode in PHILLY_ZIPCODES:
             if zipcode in week_df.index:
                 vec = week_df.loc[zipcode, emb_cols].to_numpy(dtype=float)
-                has_image = 1
+                has_image.append(1)
             else:
                 vec = np.zeros(emb_dim, dtype=float)
-                has_image = 0
+                has_image.append(0)
 
-            row = {
-                "week": week,
-                "zipcode": zipcode,
-                "has_image": has_image,
-            }
+            week_embedding.append(vec.tolist())
 
-            for i, value in enumerate(vec):
-                row[f"emb_{i}"] = value
+        rows.append({
+            "week": week,
+            "embedding": json.dumps(week_embedding),
+            "has_image": json.dumps(has_image),
+        })
 
-            all_rows.append(row)
-
-    out = pd.DataFrame(all_rows)
-
-    emb_cols = sorted_embedding_columns(out.columns)
-
-    out = out[["week", "zipcode", "has_image"] + emb_cols]
-    out = out.sort_values(
-        ["week", "zipcode"],
-        key=lambda s: s.map(lambda x: int(x) if str(x).isdigit() else x)
-    ).reset_index(drop=True)
-
-    return out
+    return pd.DataFrame(rows).sort_values("week").reset_index(drop=True)
 
 
-def cluster_by_week(week_zip_embeddings):
-    emb_cols = sorted_embedding_columns(week_zip_embeddings.columns)
-    clustered_rows = []
+def cluster_by_week(week_embeddings):
+    rows = []
 
-    for week, week_df in week_zip_embeddings.groupby("week"):
-        week_df = week_df.copy()
+    for _, row in week_embeddings.iterrows():
+        week = row["week"]
+        embedding = json.loads(row["embedding"])
+        has_image = json.loads(row["has_image"])
 
-        nonzero = week_df["has_image"] == 1
-        n_samples = int(nonzero.sum())
+        X_all = np.array(embedding, dtype=float)
+        has_image_arr = np.array(has_image, dtype=int) == 1
+        n_samples = int(has_image_arr.sum())
 
-        week_df["cluster"] = -1
+        clusters = [-1] * len(PHILLY_ZIPCODES)
 
         if n_samples >= 2:
             k = min(N_CLUSTERS, n_samples)
-            X = week_df.loc[nonzero, emb_cols].to_numpy(dtype=float)
+            X = X_all[has_image_arr]
 
             kmeans = KMeans(
                 n_clusters=k,
                 random_state=42,
-                n_init="auto"
+                n_init=10,
             )
 
-            week_df.loc[nonzero, "cluster"] = kmeans.fit_predict(X)
+            labels = kmeans.fit_predict(X)
+            label_index = 0
+
+            for i, has_value in enumerate(has_image_arr):
+                if has_value:
+                    clusters[i] = int(labels[label_index])
+                    label_index += 1
 
         elif n_samples == 1:
-            week_df.loc[nonzero, "cluster"] = 0
+            only_index = int(np.where(has_image_arr)[0][0])
+            clusters[only_index] = 0
 
-        clustered_rows.append(week_df)
+        rows.append({
+            "week": week,
+            "clusters": json.dumps(clusters),
+            "has_image": json.dumps(has_image),
+        })
 
-    out = pd.concat(clustered_rows, ignore_index=True)
-
-    emb_cols = sorted_embedding_columns(out.columns)
-
-    out = out[["week", "zipcode", "has_image", "cluster"] + emb_cols]
-    out = out.sort_values(
-        ["week", "zipcode"],
-        key=lambda s: s.map(lambda x: int(x) if str(x).isdigit() else x)
-    ).reset_index(drop=True)
-
-    return out
-
+    return pd.DataFrame(rows).sort_values("week").reset_index(drop=True)
 
 def main():
     print("Collecting images...")
@@ -256,36 +242,46 @@ def main():
     metadata, image_embeddings = embed_images(df, model, transform, device)
 
     np.save(
-        OUT_DIR / "image_embeddings_2025.npy",
+        OUT_DIR / f"image_embeddings_{YEAR}.npy",
         image_embeddings
     )
 
     metadata.to_csv(
-        OUT_DIR / "image_embeddings_metadata_2025.csv",
+        OUT_DIR / f"image_embeddings_metadata_{YEAR}.csv",
         index=False
     )
 
-    week_zip_embeddings = build_week_zip_embeddings(
+    zipcode_order = pd.DataFrame({
+        "zipcode_order": range(len(PHILLY_ZIPCODES)),
+        "zipcode": PHILLY_ZIPCODES,
+    })
+
+    zipcode_order.to_csv(
+        OUT_DIR / "philadelphia_zipcode_order.csv",
+        index=False
+    )
+
+    print("Building weekly embeddings...")
+    week_embeddings = build_week_embeddings(
         metadata,
         image_embeddings
     )
 
-    week_zip_embeddings.to_csv(
-        OUT_DIR / "weekly_zip_embeddings_2025.csv",
+    week_embeddings[["week", "embedding"]].to_csv(
+        OUT_DIR / f"weekly_image_embeddings_{YEAR}.csv",
         index=False
     )
 
-    clustered = cluster_by_week(week_zip_embeddings)
+    week_embeddings.to_csv(
+        OUT_DIR / f"weekly_image_embeddings_with_has_image_{YEAR}.csv",
+        index=False
+    )
+
+    print("Clustering by week...")
+    clustered = cluster_by_week(week_embeddings)
 
     clustered.to_csv(
-        OUT_DIR / "weekly_zip_embeddings_clusters_2025.csv",
-        index=False
-    )
-
-    cluster_only = clustered[["week", "zipcode", "has_image", "cluster"]]
-
-    cluster_only.to_csv(
-        OUT_DIR / "weekly_zip_clusters_2025.csv",
+        OUT_DIR / f"weekly_image_clusters_{YEAR}.csv",
         index=False
     )
 
