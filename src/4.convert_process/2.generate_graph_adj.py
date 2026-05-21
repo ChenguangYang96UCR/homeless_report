@@ -11,7 +11,7 @@ OUTPUT_DIR = Path("outputs/philly_2022_2025_gla_format")
 ADJ_OUTPUT = OUTPUT_DIR / "philly_rn_adj.npy"
 COUNT_DIR = "/Users/chenguangyang/Desktop/ucr_work/homeless_report/raw_data/zip_count"
 ZIP_ORDER = "/Users/chenguangyang/Desktop/ucr_work/homeless_report/text_embedding/text_embedding_cluster_2022/philadelphia_zipcode_order.csv"
-FULL_NPZ = "/Users/chenguangyang/Desktop/ucr_work/homeless_report/src/3.convert_process/outputs/philly_2022_2025_gla_format/philly_2022_2025_full.npz"
+FULL_NPZ = "/Users/chenguangyang/Desktop/ucr_work/homeless_report/src/4.convert_process/outputs/philly_2022_2025_gla_format/philly_2022_2025_full.npz"
 
 def parse_zip_order(path):
     lines = [line.strip() for line in Path(path).read_text().splitlines() if line.strip()]
